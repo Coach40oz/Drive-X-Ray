@@ -20,18 +20,18 @@ try {
     # Silently continue — terminal will use whatever width it has
 }
 
-# Derive usable width from actual console
-$script:ConsoleWidth = [Math]::Min(($Host.UI.RawUI.WindowSize.Width - 5), 125)
+# Derive usable width from actual console (minimum 80 to prevent negative PadRight)
+$Global:ConsoleWidth = [Math]::Max(80, [Math]::Min(($Host.UI.RawUI.WindowSize.Width - 5), 125))
 
 # Detect emoji support (PS 7+ on modern terminals)
-$script:UseEmoji = ($PSVersionTable.PSVersion.Major -ge 7)
+$Global:UseEmoji = ($PSVersionTable.PSVersion.Major -ge 7)
 function Get-Symbol {
     param ([string]$Emoji, [string]$Fallback)
-    if ($script:UseEmoji) { $Emoji } else { $Fallback }
+    if ($Global:UseEmoji) { $Emoji } else { $Fallback }
 }
 
-# Script-scoped tracking (not Global — won't pollute the session after exit)
-$script:AnalysisResults = @{
+# Global tracking (cleaned up on exit) — $script: can break depending on launch method
+$Global:AnalysisResults = @{
     LargestFiles    = [System.Collections.ArrayList]::new()
     LargestFolders  = [System.Collections.ArrayList]::new()
     FileExtensions  = @{}
@@ -67,7 +67,7 @@ function Show-AnimatedBanner {
         if (-not $SkipAnimation) { Start-Sleep -Milliseconds 20 }
     }
 
-    Write-Host ("+" + "".PadRight([Math]::Min($script:ConsoleWidth, 125), "-") + "+") -ForegroundColor Cyan
+    Write-Host ("+" + "".PadRight([Math]::Max(1, [Math]::Min($Global:ConsoleWidth, 125)), "-") + "+") -ForegroundColor Cyan
 }
 
 function Show-InfoBox {
@@ -85,16 +85,21 @@ function Show-InfoBox {
     foreach ($line in $Content) {
         if ($line.Length -gt $contentMaxLen) { $contentMaxLen = $line.Length }
     }
-    $width = [Math]::Min($script:ConsoleWidth, [Math]::Max($titleLength + 10, $contentMaxLen + 6))
+    $width = [Math]::Max(20, [Math]::Min($Global:ConsoleWidth, [Math]::Max($titleLength + 10, $contentMaxLen + 6)))
 
     # Top border with title
     $halfPad = [Math]::Max(0, [Math]::Floor(($width - $Title.Length - 4) / 2))
-    Write-Host ("+" + "".PadRight($halfPad, "-") + " $Title " + "".PadRight([Math]::Max(0, $width - $halfPad - $Title.Length - 2), "-") + "+") -ForegroundColor $BorderColor
+    $rightPadTop = [Math]::Max(0, $width - $halfPad - $Title.Length - 2)
+    Write-Host ("+" + "".PadRight($halfPad, "-") + " $Title " + "".PadRight($rightPadTop, "-") + "+") -ForegroundColor $BorderColor
 
     # Content
     foreach ($line in $Content) {
-        $innerWidth = $width - 4
-        $displayLine = if ($line.Length -gt $innerWidth) { $line.Substring(0, $innerWidth - 3) + "..." } else { $line }
+        $innerWidth = [Math]::Max(4, $width - 4)
+        $displayLine = if ($line.Length -gt $innerWidth -and $innerWidth -gt 3) {
+            $line.Substring(0, $innerWidth - 3) + "..."
+        } elseif ($line.Length -gt $innerWidth) {
+            $line.Substring(0, $innerWidth)
+        } else { $line }
         $pad = [Math]::Max(0, $innerWidth - $displayLine.Length)
 
         Write-Host "| " -NoNewline -ForegroundColor $BorderColor
@@ -109,7 +114,7 @@ function Show-InfoBox {
     }
 
     # Bottom border
-    Write-Host ("+" + "".PadRight($width - 2, "-") + "+") -ForegroundColor $BorderColor
+    Write-Host ("+" + "".PadRight([Math]::Max(0, $width - 2), "-") + "+") -ForegroundColor $BorderColor
 }
 
 function Show-ProgressBar {
@@ -140,13 +145,9 @@ function Show-ScanProgress {
         [string]$Message = "Scanning",
         [int]$Counter
     )
-
-    $spinner = @('|', '/', '-', '\')
-    $frame = $spinner[$Counter % $spinner.Length]
-    $filesScanned = $script:AnalysisResults.FilesScanned
-    $foldersScanned = $script:AnalysisResults.FoldersScanned
-
-    Write-Host ("`r  $frame $Message ... Files: $filesScanned  Folders: $foldersScanned   ") -NoNewline -ForegroundColor Yellow
+    $filesScanned = $Global:AnalysisResults.FilesScanned
+    $foldersScanned = $Global:AnalysisResults.FoldersScanned
+    Write-Progress -Activity "DriveX-Ray Scan" -Status "Files: $filesScanned  Folders: $foldersScanned" -PercentComplete -1
 }
 
 function Format-FileSize {
@@ -161,25 +162,6 @@ function Format-FileSize {
 #endregion
 
 #region ── Core scan engine ────────────────────────────────────────────────────
-
-function Add-ToResults {
-    param (
-        [PSCustomObject]$Item,
-        [string]$Type,
-        [int]$MaxCount = 100
-    )
-
-    $collection = if ($Type -eq "File") { $script:AnalysisResults.LargestFiles } else { $script:AnalysisResults.LargestFolders }
-
-    [void]$collection.Add($Item)
-
-    # Trim only when we hit 2x capacity — avoids sorting on every single add
-    if ($collection.Count -ge ($MaxCount * 2)) {
-        $sorted = $collection | Sort-Object -Property Size -Descending | Select-Object -First $MaxCount
-        $collection.Clear()
-        foreach ($s in $sorted) { [void]$collection.Add($s) }
-    }
-}
 
 function Get-DirectorySize {
     param (
@@ -197,8 +179,8 @@ function Get-DirectorySize {
     $folderName = Split-Path $Path -Leaf
     if ($criticalExclusions -contains $folderName) { return [uint64]0 }
 
-    if ($CurrentDepth -gt $script:AnalysisResults.MaxDepthReached) {
-        $script:AnalysisResults.MaxDepthReached = $CurrentDepth
+    if ($CurrentDepth -gt $Global:AnalysisResults.MaxDepthReached) {
+        $Global:AnalysisResults.MaxDepthReached = $CurrentDepth
     }
 
     # ── Try fast .NET enumeration first, fall back to Get-ChildItem ──
@@ -207,72 +189,92 @@ function Get-DirectorySize {
     try {
         $entries = [System.IO.Directory]::EnumerateFileSystemEntries($Path)
     } catch [System.UnauthorizedAccessException] {
-        $script:AnalysisResults.SkippedFolders++
+        $Global:AnalysisResults.SkippedFolders++
         return [uint64]0
     } catch {
         $useNetApi = $false
     }
 
     if ($useNetApi -and $null -ne $entries) {
-        $script:AnalysisResults.FoldersScanned++
+        $Global:AnalysisResults.FoldersScanned++
 
         foreach ($entry in $entries) {
+            $ProgressCounter.Value++
+            if ($ProgressCounter.Value % 500 -eq 0) {
+                Show-ScanProgress -Message "Scanning" -Counter $ProgressCounter.Value
+            }
+
+            # Get attributes — skip entry entirely if we can't read it
             try {
-                $ProgressCounter.Value++
-                if ($ProgressCounter.Value % 500 -eq 0) {
-                    Show-ScanProgress -Message "Scanning" -Counter $ProgressCounter.Value
-                }
-
                 $attr = [System.IO.File]::GetAttributes($entry)
-
-                if ($attr -band [System.IO.FileAttributes]::Directory) {
-                    # ── Directory ──
-                    if ($CurrentDepth -lt $MaxDepth) {
-                        $subdirSize = Get-DirectorySize -Path $entry -CurrentDepth ($CurrentDepth + 1) -MaxDepth $MaxDepth -ProgressCounter $ProgressCounter
-                        $directorySize += $subdirSize
-
-                        if ($subdirSize -gt 5MB) {
-                            $dirName = [System.IO.Path]::GetFileName($entry)
-                            $folderObject = [PSCustomObject]@{
-                                Path           = $entry
-                                Name           = $dirName
-                                Size           = [uint64]$subdirSize
-                                SizeFormatted  = Format-FileSize $subdirSize
-                                SizePercentage = 0
-                                Depth          = $CurrentDepth
-                            }
-                            Add-ToResults -Item $folderObject -Type "Folder" -MaxCount 50
-                        }
-                    }
-                } else {
-                    # ── File ──
-                    $fi = [System.IO.FileInfo]::new($entry)
-                    [uint64]$fileSize = $fi.Length
-                    $directorySize += $fileSize
-                    $script:AnalysisResults.FilesScanned++
-
-                    $extension = if ($fi.Extension) { $fi.Extension.ToLower() } else { "(no extension)" }
-                    if (-not $script:AnalysisResults.FileExtensions.ContainsKey($extension)) {
-                        $script:AnalysisResults.FileExtensions[$extension] = @{ Size = [uint64]0; Count = 0 }
-                    }
-                    $script:AnalysisResults.FileExtensions[$extension].Size  += $fileSize
-                    $script:AnalysisResults.FileExtensions[$extension].Count++
-
-                    if ($fileSize -gt 1MB) {
-                        $fileObject = [PSCustomObject]@{
-                            Path          = $fi.FullName
-                            Name          = $fi.Name
-                            Extension     = $extension
-                            Size          = [uint64]$fileSize
-                            SizeFormatted = Format-FileSize $fileSize
-                            Created       = $fi.CreationTime
-                            Modified      = $fi.LastWriteTime
-                        }
-                        Add-ToResults -Item $fileObject -Type "File"
-                    }
-                }
             } catch {
                 continue
+            }
+
+            if ($attr -band [System.IO.FileAttributes]::Directory) {
+                # ── Directory ──
+                if ($CurrentDepth -lt $MaxDepth) {
+                    $subdirSize = Get-DirectorySize -Path $entry -CurrentDepth ($CurrentDepth + 1) -MaxDepth $MaxDepth -ProgressCounter $ProgressCounter
+                    $directorySize += $subdirSize
+
+                    if ($subdirSize -gt 5MB) {
+                        $dirName = [System.IO.Path]::GetFileName($entry)
+                        [void]$Global:AnalysisResults.LargestFolders.Add([PSCustomObject]@{
+                            Path           = $entry
+                            Name           = $dirName
+                            Size           = [uint64]$subdirSize
+                            SizeFormatted  = $null  # computed at display time
+                            SizePercentage = 0
+                            Depth          = $CurrentDepth
+                        })
+                    }
+                }
+            } else {
+                # ── File ──
+                [uint64]$fileSize = 0
+                $fileName = $null
+                $extension = "(no extension)"
+                try {
+                    $fi = [System.IO.FileInfo]::new($entry)
+                    $fileSize  = $fi.Length
+                    $fileName  = $fi.Name
+                    $extension = if ($fi.Extension) { $fi.Extension.ToLower() } else { "(no extension)" }
+                } catch {
+                    # Fallback: get size from path string
+                    try {
+                        $fileSize  = (Get-Item -LiteralPath $entry -Force -ErrorAction Stop).Length
+                        $fileName  = Split-Path $entry -Leaf
+                        $ext = [System.IO.Path]::GetExtension($entry)
+                        $extension = if ($ext) { $ext.ToLower() } else { "(no extension)" }
+                    } catch { continue }
+                }
+
+                $directorySize += $fileSize
+                $Global:AnalysisResults.FilesScanned++
+
+                if (-not $Global:AnalysisResults.FileExtensions.ContainsKey($extension)) {
+                    $Global:AnalysisResults.FileExtensions[$extension] = @{ Size = [uint64]0; Count = 0 }
+                }
+                $Global:AnalysisResults.FileExtensions[$extension].Size  += $fileSize
+                $Global:AnalysisResults.FileExtensions[$extension].Count++
+
+                if ($fileSize -gt 1MB) {
+                    # Get timestamps safely — don't let metadata failure skip the file
+                    $created  = $null
+                    $modified = $null
+                    try { $created  = $fi.CreationTime }  catch {}
+                    try { $modified = $fi.LastWriteTime } catch {}
+
+                    [void]$Global:AnalysisResults.LargestFiles.Add([PSCustomObject]@{
+                        Path          = $entry
+                        Name          = $fileName
+                        Extension     = $extension
+                        Size          = [uint64]$fileSize
+                        SizeFormatted = $null  # computed at display time
+                        Created       = $created
+                        Modified      = $modified
+                    })
+                }
             }
         }
 
@@ -282,44 +284,46 @@ function Get-DirectorySize {
     # ── Fallback: Get-ChildItem (slower but always works) ──
     try {
         $items = Get-ChildItem -Path $Path -Force -ErrorAction Stop
-        $script:AnalysisResults.FoldersScanned++
+        $Global:AnalysisResults.FoldersScanned++
     } catch {
-        $script:AnalysisResults.SkippedFolders++
+        $Global:AnalysisResults.SkippedFolders++
         return [uint64]0
     }
 
     if (-not $items) { return [uint64]0 }
 
     foreach ($item in $items) {
-        try {
-            $ProgressCounter.Value++
-            if ($ProgressCounter.Value % 500 -eq 0) {
-                Show-ScanProgress -Message "Scanning" -Counter $ProgressCounter.Value
-            }
+        $ProgressCounter.Value++
+        if ($ProgressCounter.Value % 500 -eq 0) {
+            Show-ScanProgress -Message "Scanning" -Counter $ProgressCounter.Value
+        }
 
+        try {
             if (-not $item.PSIsContainer) {
                 [uint64]$fileSize = $item.Length
                 $directorySize += $fileSize
-                $script:AnalysisResults.FilesScanned++
+                $Global:AnalysisResults.FilesScanned++
 
                 $extension = if ($item.Extension) { $item.Extension.ToLower() } else { "(no extension)" }
-                if (-not $script:AnalysisResults.FileExtensions.ContainsKey($extension)) {
-                    $script:AnalysisResults.FileExtensions[$extension] = @{ Size = [uint64]0; Count = 0 }
+                if (-not $Global:AnalysisResults.FileExtensions.ContainsKey($extension)) {
+                    $Global:AnalysisResults.FileExtensions[$extension] = @{ Size = [uint64]0; Count = 0 }
                 }
-                $script:AnalysisResults.FileExtensions[$extension].Size  += $fileSize
-                $script:AnalysisResults.FileExtensions[$extension].Count++
+                $Global:AnalysisResults.FileExtensions[$extension].Size  += $fileSize
+                $Global:AnalysisResults.FileExtensions[$extension].Count++
 
                 if ($fileSize -gt 1MB) {
-                    $fileObject = [PSCustomObject]@{
+                    $created  = try { $item.CreationTime }  catch { $null }
+                    $modified = try { $item.LastWriteTime } catch { $null }
+
+                    [void]$Global:AnalysisResults.LargestFiles.Add([PSCustomObject]@{
                         Path          = $item.FullName
                         Name          = $item.Name
                         Extension     = $extension
                         Size          = [uint64]$fileSize
-                        SizeFormatted = Format-FileSize $fileSize
-                        Created       = $item.CreationTime
-                        Modified      = $item.LastWriteTime
-                    }
-                    Add-ToResults -Item $fileObject -Type "File"
+                        SizeFormatted = $null
+                        Created       = $created
+                        Modified      = $modified
+                    })
                 }
             } else {
                 if ($CurrentDepth -lt $MaxDepth) {
@@ -327,15 +331,14 @@ function Get-DirectorySize {
                     $directorySize += $subdirSize
 
                     if ($subdirSize -gt 5MB) {
-                        $folderObject = [PSCustomObject]@{
+                        [void]$Global:AnalysisResults.LargestFolders.Add([PSCustomObject]@{
                             Path           = $item.FullName
                             Name           = $item.Name
                             Size           = [uint64]$subdirSize
-                            SizeFormatted  = Format-FileSize $subdirSize
+                            SizeFormatted  = $null
                             SizePercentage = 0
                             Depth          = $CurrentDepth
-                        }
-                        Add-ToResults -Item $folderObject -Type "Folder" -MaxCount 50
+                        })
                     }
                 }
             }
@@ -365,8 +368,8 @@ function Show-TreemapVisualization {
     Write-Host ""
     Show-InfoBox -Title "DISK SPACE TREEMAP VISUALIZATION" -Content @("Visual representation of space usage across your drive") -BorderColor Magenta -TitleColor Cyan -Center
 
-    $boxWidth = [Math]::Min($script:ConsoleWidth, 123)
-    $maxBarWidth = $boxWidth - 43  # room for name + size + percent + borders
+    $boxWidth = [Math]::Max(50, [Math]::Min($Global:ConsoleWidth, 123))
+    $maxBarWidth = [Math]::Max(10, $boxWidth - 43)  # room for name + size + percent + borders
 
     Write-Host ("+" + "".PadRight($boxWidth, "-") + "+") -ForegroundColor Cyan
 
@@ -390,7 +393,7 @@ function Show-TreemapVisualization {
         Write-Host "| " -NoNewline -ForegroundColor Cyan
         Write-Host ("{0,-35}" -f $folderName) -NoNewline -ForegroundColor White
         Write-Host " " -NoNewline
-        Write-Host $bar.PadRight($maxBarWidth, " ") -NoNewline -ForegroundColor $barColor
+        Write-Host $bar.PadRight([Math]::Max($barWidth, $maxBarWidth), " ") -NoNewline -ForegroundColor $barColor
         Write-Host (" {0,10} ({1,6:F2}%)" -f $folder.SizeFormatted, $percentage) -NoNewline -ForegroundColor Gray
         Write-Host " |" -ForegroundColor Cyan
     }
@@ -444,7 +447,8 @@ function Show-ResultTable {
             Write-Host ("{0,-60}" -f $displayPath) -NoNewline -ForegroundColor Green
             Write-Host (" | {0,15} | " -f $item.SizeFormatted) -NoNewline -ForegroundColor Yellow
             Write-Host ("{0,-12}" -f $fileType) -NoNewline -ForegroundColor $typeColor
-            Write-Host (" | {0,-14} |" -f $item.Modified.ToString('yyyy-MM-dd')) -ForegroundColor DarkCyan
+            $modDate = if ($item.Modified -and $item.Modified -ne [datetime]::MinValue) { $item.Modified.ToString('yyyy-MM-dd') } else { "N/A" }
+            Write-Host (" | {0,-14} |" -f $modDate) -ForegroundColor DarkCyan
         }
 
         Write-Host "+-----+--------------------------------------------------------------+-----------------+--------------+----------------+" -ForegroundColor Cyan
@@ -488,8 +492,8 @@ function Export-ResultsCsv {
     $filesPath  = Join-Path $desktopPath "${baseName}_Files.csv"
     $foldersPath = Join-Path $desktopPath "${baseName}_Folders.csv"
 
-    $script:AnalysisResults.LargestFiles  | Sort-Object Size -Descending | Export-Csv -Path $filesPath  -NoTypeInformation
-    $script:AnalysisResults.LargestFolders | Sort-Object Size -Descending | Export-Csv -Path $foldersPath -NoTypeInformation
+    $Global:AnalysisResults.LargestFiles  | Sort-Object Size -Descending | Export-Csv -Path $filesPath  -NoTypeInformation
+    $Global:AnalysisResults.LargestFolders | Sort-Object Size -Descending | Export-Csv -Path $foldersPath -NoTypeInformation
 
     Write-Host ""
     $ok = Get-Symbol "✅" "[OK]"
@@ -511,13 +515,13 @@ function Invoke-DriveAnalysis {
     if (-not $DriveLetter.EndsWith(":")) { $DriveLetter = "$($DriveLetter):" }
 
     # Reset analysis data
-    $script:AnalysisResults.LargestFiles.Clear()
-    $script:AnalysisResults.LargestFolders.Clear()
-    $script:AnalysisResults.FileExtensions.Clear()
-    $script:AnalysisResults.FilesScanned    = 0
-    $script:AnalysisResults.FoldersScanned  = 0
-    $script:AnalysisResults.SkippedFolders  = 0
-    $script:AnalysisResults.MaxDepthReached = 0
+    $Global:AnalysisResults.LargestFiles.Clear()
+    $Global:AnalysisResults.LargestFolders.Clear()
+    $Global:AnalysisResults.FileExtensions.Clear()
+    $Global:AnalysisResults.FilesScanned    = 0
+    $Global:AnalysisResults.FoldersScanned  = 0
+    $Global:AnalysisResults.SkippedFolders  = 0
+    $Global:AnalysisResults.MaxDepthReached = 0
 
     Clear-Host
     Show-AnimatedBanner -SkipAnimation
@@ -556,29 +560,33 @@ function Invoke-DriveAnalysis {
                else                          { 8 }
 
     $scan = Get-Symbol "🔄" "[..]"
-    Write-Host "  $scan Starting deep scan (max depth: $maxDepth levels)..." -ForegroundColor Cyan
-    Write-Host ""
+    Write-Host "  $scan Scanning files, please wait..." -ForegroundColor Cyan
 
     $totalScannedSize = Get-DirectorySize -Path "$DriveLetter\" -MaxDepth $maxDepth -ProgressCounter $progressCounter
 
-    # Clear progress line
-    Write-Host ("`r" + " " * ($script:ConsoleWidth + 5) + "`r") -NoNewline
+    Write-Progress -Activity "DriveX-Ray Scan" -Completed
+    Write-Host ""
 
     $endTime  = Get-Date
     $duration = $endTime - $startTime
 
-    # Final sort of results (only once, after scan completes)
-    $sortedFiles   = $script:AnalysisResults.LargestFiles   | Sort-Object -Property Size -Descending
-    $sortedFolders = $script:AnalysisResults.LargestFolders | Sort-Object -Property Size -Descending
+    # Final sort, trim, and compute display fields (only once, after scan completes)
+    $sortedFiles   = @($Global:AnalysisResults.LargestFiles   | Sort-Object -Property Size -Descending | Select-Object -First 100)
+    $sortedFolders = @($Global:AnalysisResults.LargestFolders | Sort-Object -Property Size -Descending | Select-Object -First 50)
 
-    $script:AnalysisResults.LargestFiles.Clear()
-    foreach ($f in $sortedFiles)   { [void]$script:AnalysisResults.LargestFiles.Add($f) }
-    $script:AnalysisResults.LargestFolders.Clear()
-    foreach ($f in $sortedFolders) { [void]$script:AnalysisResults.LargestFolders.Add($f) }
+    $Global:AnalysisResults.LargestFiles.Clear()
+    foreach ($f in $sortedFiles) {
+        $f.SizeFormatted = Format-FileSize $f.Size
+        if ($null -eq $f.Modified) { $f.Modified = [datetime]::MinValue }
+        if ($null -eq $f.Created)  { $f.Created  = [datetime]::MinValue }
+        [void]$Global:AnalysisResults.LargestFiles.Add($f)
+    }
 
-    # Calculate folder percentages
-    foreach ($folder in $script:AnalysisResults.LargestFolders) {
-        $folder.SizePercentage = if ($usedSpace -gt 0) { [Math]::Round(($folder.Size / $usedSpace) * 100, 3) } else { 0 }
+    $Global:AnalysisResults.LargestFolders.Clear()
+    foreach ($f in $sortedFolders) {
+        $f.SizeFormatted  = Format-FileSize $f.Size
+        $f.SizePercentage = if ($usedSpace -gt 0) { [Math]::Round(($f.Size / $usedSpace) * 100, 3) } else { 0 }
+        [void]$Global:AnalysisResults.LargestFolders.Add($f)
     }
 
     # Completion stats
@@ -591,20 +599,20 @@ function Invoke-DriveAnalysis {
 
     Write-Host "  $ok Scan completed successfully!" -ForegroundColor Green
     Write-Host "  $clock Duration: $($duration.Minutes)m $($duration.Seconds)s" -ForegroundColor Gray
-    Write-Host "  $dirs Folders: $($script:AnalysisResults.FoldersScanned) | $files Files: $($script:AnalysisResults.FilesScanned) | $skip Skipped: $($script:AnalysisResults.SkippedFolders)" -ForegroundColor Gray
-    Write-Host "  $chart Data processed: $(Format-FileSize $totalScannedSize) | Max depth: $($script:AnalysisResults.MaxDepthReached)" -ForegroundColor Cyan
+    Write-Host "  $dirs Folders: $($Global:AnalysisResults.FoldersScanned) | $files Files: $($Global:AnalysisResults.FilesScanned) | $skip Skipped: $($Global:AnalysisResults.SkippedFolders)" -ForegroundColor Gray
+    Write-Host "  $chart Data processed: $(Format-FileSize $totalScannedSize) | Max depth: $($Global:AnalysisResults.MaxDepthReached)" -ForegroundColor Cyan
 
     # Display results
-    Show-TreemapVisualization -FolderData $script:AnalysisResults.LargestFolders -TotalSize $usedSpace
-    Show-ResultTable -Data $script:AnalysisResults.LargestFolders -Title "LARGEST FOLDERS" -Type "folders" -Count 25
-    Show-ResultTable -Data $script:AnalysisResults.LargestFiles   -Title "LARGEST FILES"   -Type "files"   -Count 25
+    Show-TreemapVisualization -FolderData $Global:AnalysisResults.LargestFolders -TotalSize $usedSpace
+    Show-ResultTable -Data $Global:AnalysisResults.LargestFolders -Title "LARGEST FOLDERS" -Type "folders" -Count 25
+    Show-ResultTable -Data $Global:AnalysisResults.LargestFiles   -Title "LARGEST FILES"   -Type "files"   -Count 25
 
     # File type analysis
-    if ($script:AnalysisResults.FileExtensions.Count -gt 0) {
+    if ($Global:AnalysisResults.FileExtensions.Count -gt 0) {
         Write-Host ""
         Show-InfoBox -Title "FILE TYPE ANALYSIS" -Content @("Breakdown of space usage by file type") -BorderColor Magenta -TitleColor Yellow
 
-        $extensionStats = $script:AnalysisResults.FileExtensions.GetEnumerator() |
+        $extensionStats = $Global:AnalysisResults.FileExtensions.GetEnumerator() |
             ForEach-Object {
                 [PSCustomObject]@{
                     Extension      = $_.Key
@@ -772,5 +780,8 @@ function Start-DriveAnalyzer {
 
 # Single entry point — no recursion
 Start-DriveAnalyzer
+
+# Clean up global variables so we don't pollute the session
+Remove-Variable -Name AnalysisResults, ConsoleWidth, UseEmoji -Scope Global -ErrorAction SilentlyContinue
 
 #endregion
