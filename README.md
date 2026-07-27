@@ -1,49 +1,50 @@
-# 🔍 Drive-X-Ray
+# Drive-X-Ray
 
-**Advanced PowerShell Disk Space Analyzer with Enhanced GUI**
+**Visual disk space analyzer for the PowerShell console**
 
-Drive-X-Ray is a comprehensive disk space analyzer that helps you understand what's consuming space on your drives. With its colorful, user-friendly console interface, it provides clear visibility into your file system — no additional software required.
+Drive-X-Ray tells you what is actually eating your disk. It scans a drive and
+reports the largest folders, the largest files and a breakdown by file type,
+all rendered as colour-coded tables and a treemap in the terminal. No install,
+no dependencies, one script.
 
 ---
 
 ## Features
 
-- **High-Performance .NET Scanning** — Uses `[System.IO.Directory]::EnumerateFileSystemEntries()` for 3–5x faster scanning with automatic `Get-ChildItem` fallback
-- **Adaptive Deep Scan** — Automatically adjusts scan depth (6–8 levels) based on drive size
-- **Largest Files Detection** — Identifies files over 1 MB consuming your storage
-- **Folder Space Usage** — Tracks folders over 5 MB with percentage-of-drive breakdowns
-- **File Type Analysis** — Visual breakdown of space usage by extension with color-coded categories
-- **Treemap Visualization** — Horizontal bar chart showing relative folder sizes at a glance
-- **Post-Scan Menu** — Rescan, switch drives, or export results to CSV without restarting
-- **CSV Export** — One-click export of file and folder results to your Desktop
-- **Emoji Auto-Detection** — Uses emoji on PowerShell 7+ and ASCII fallbacks on older terminals
-- **Dynamic Console Layout** — Adapts box widths and tables to your actual terminal size
-- **Graceful Admin Handling** — Runs with or without Administrator privileges
-- **Session-Clean** — Uses `$script:` scoping so nothing pollutes your PowerShell session after exit
+- **Fast .NET scan engine** — enumerates with `DirectoryInfo.EnumerateFileSystemInfos()`, reading size and attributes straight from the directory entry instead of re-stat'ing every file
+- **Accurate sizes** — the whole tree is always measured; the depth setting limits how much is *listed*, never what is *counted*
+- **Junction- and symlink-aware** — reparse points are skipped, so `C:\Users\All Users` is not counted a second time as `C:\ProgramData`
+- **Treemap that adds up** — top-level folders plus explicit "files in drive root" and "not scanned" rows, so the percentages total 100%
+- **Largest files and folders** — colour-coded tables with size, share of used space and last-modified date
+- **File type analysis** — space by extension, with proportional bars
+- **Coverage reporting** — tells you how much of the drive it could actually read, and warns when running unelevated costs you visibility
+- **Post-scan menu** — rescan, switch drives, or export without restarting
+- **CSV export** — files, folders and file types, written to the Desktop or a path you choose
+- **Scriptable** — `-Drive`, `-MaxDepth`, `-Top`, `-ExportPath`, `-NonInteractive`
+- **Adapts to your terminal** — every box and table is sized from the real console width
+- **Works elevated or not** — inaccessible folders are counted and reported rather than aborting the scan
 
 ## Requirements
 
-- Windows operating system
-- PowerShell 5.1 or higher
-- Administrator privileges recommended for full system access (not required)
+- Windows
+- PowerShell 5.1 or later (PowerShell 7+ is faster and renders emoji)
+- Administrator rights are optional but improve coverage of protected system folders
 
-## Quick Start
+## Quick start
 
-### Option 1: Run Directly from GitHub
-
-Run in an elevated PowerShell prompt:
-
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/Coach40oz/Drive-X-Ray/main/DriveX-Ray.ps1'))
-```
-
-### Option 2: One-Liner (PowerShell 7+)
+### Run directly from GitHub
 
 ```powershell
 irm https://raw.githubusercontent.com/Coach40oz/Drive-X-Ray/main/DriveX-Ray.ps1 | iex
 ```
 
-### Option 3: Download and Run Locally
+On Windows PowerShell 5.1:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/Coach40oz/Drive-X-Ray/main/DriveX-Ray.ps1'))
+```
+
+### Download and run locally
 
 ```powershell
 git clone https://github.com/Coach40oz/Drive-X-Ray.git
@@ -51,58 +52,80 @@ cd Drive-X-Ray
 .\DriveX-Ray.ps1
 ```
 
-> Right-click `DriveX-Ray.ps1` and select **Run with PowerShell**, or run as Administrator for full access.
-
 ## Usage
 
-1. Launch Drive-X-Ray — it detects available drives and displays their usage
-2. If not running as Administrator, you'll be prompted to continue with limited access
-3. Select a drive letter to analyze
-4. Wait for the scan to complete (a live spinner shows files/folders scanned)
-5. Review the results:
-   - **Treemap Visualization** — horizontal bar chart of the top 25 folders by size
-   - **Largest Folders** — top 25 folders with size, % of drive, and depth
-   - **Largest Files** — top 25 files with size, type, and last modified date
-   - **File Type Analysis** — top 20 extensions by total size with visual distribution bars
-6. Use the post-scan menu:
+Run it with no arguments for the interactive flow: pick a drive from the
+detected list, watch the progress counter, then browse the report and use the
+post-scan menu.
 
 | Key | Action |
 |-----|--------|
 | `R` | Rescan the current drive |
 | `D` | Scan a different drive |
-| `E` | Export results to CSV on your Desktop |
+| `E` | Export results to CSV |
 | `Q` | Quit |
 
-## Example Output
+### Parameters
 
-When you run Drive-X-Ray, you'll see:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-Drive` | *(prompts)* | Drive to scan. Accepts `C`, `C:` or `C:\` |
+| `-MaxDepth` | `8` | How many folder levels are **listed**. `1` = top-level folders only. Does not affect measured sizes |
+| `-Top` | `25` | Rows in the file and folder tables |
+| `-ExportPath` | Desktop | Where `[E]` writes the CSV files |
+| `-NonInteractive` | off | Scan, print the report and exit. Use with `-Drive` |
 
-- A colorful ASCII art banner
-- Drive statistics with total, used, and free space via a visual progress bar
-- Scan progress with a live spinner and file/folder counts
-- Treemap visualization of folder sizes
-- Tables showing largest folders and files sorted by size
-- File extension analysis with color-coded type categories
+```powershell
+# Just the top-level breakdown of C:, 40 rows
+.\DriveX-Ray.ps1 -Drive C -MaxDepth 1 -Top 40
 
-> **Tip:** Add a screenshot to a `screenshots/` folder and uncomment the image line above — it makes a huge difference for repo engagement.
+# Unattended: scan D: and exit
+.\DriveX-Ray.ps1 -Drive D -NonInteractive
+```
 
-## Technical Details
+## Reading the output
+
+- **Drive statistics** — total, used and free, with a usage bar
+- **Scan summary** — folders and files scanned, folders that could not be read, links skipped, and the **coverage** percentage. Coverage well below 100% usually means you should re-run elevated
+- **Treemap** — top-level folders as a share of used space. Because only depth-0 folders are shown, plus rows for loose root files and unreadable space, the bars partition the drive and sum to 100%
+- **Largest folders** — sizes are cumulative, so a folder includes everything nested inside it. `% Used` is its share of used space, and `Depth` is its level below the drive root
+- **Largest files** — the individual files worth deleting first
+- **File type analysis** — where space goes by extension
+
+## Technical notes
 
 | Component | Detail |
 |-----------|--------|
-| Scan Engine | .NET `EnumerateFileSystemEntries` with `Get-ChildItem` fallback |
-| Performance | Deferred sorting — results collected during scan, sorted once at the end |
-| Size Handling | All sizes use `[uint64]` to avoid overflow on multi-TB drives |
-| Exclusions | `$Recycle.Bin`, `System Volume Information`, `Recovery`, `Config.Msi`, system page/swap files |
-| Scoping | All state is `$script:` scoped — no global variable pollution |
+| Scan engine | `DirectoryInfo.EnumerateFileSystemInfos()`; size, attributes and timestamps come from the enumeration itself, so scanning a file costs no extra I/O |
+| Access errors | `EnumerationOptions.IgnoreInaccessible` on PowerShell 7+; on 5.1 the enumerator's `MoveNext()` is guarded per directory, so one unreadable folder cannot abort the scan |
+| Reparse points | Junctions and symlinks are detected via `FileAttributes.ReparsePoint` and skipped, preventing double-counting and traversal cycles |
+| Depth | Traversal is unbounded (hard safety cap of 64 levels); `-MaxDepth` only limits which folders are listed |
+| Memory | Candidate lists self-trim, raising the size threshold to the smallest survivor, so a multi-TB drive does not accumulate hundreds of thousands of objects |
+| Size handling | `[uint64]` throughout, with explicit casts where PowerShell would otherwise promote to `double` |
+| Progress | Throttled to ~5 updates/second so `Write-Progress` does not dominate the scan |
+| Encoding | The source is pure ASCII. Box-drawing characters and emoji are built from code points at runtime, so the script renders correctly whether it is dot-sourced on a 5.1 ANSI console or piped through `iex` |
+| Scoping | All state is `$script:` scoped and removed on exit |
+
+## Development
+
+Static analysis:
+
+```powershell
+Install-Module PSScriptAnalyzer -Scope CurrentUser
+Invoke-ScriptAnalyzer -Path .\DriveX-Ray.ps1 -Settings .\PSScriptAnalyzerSettings.psd1
+```
+
+`PSScriptAnalyzerSettings.psd1` disables two rules that do not apply to an
+interactive console application; everything else is expected to stay clean.
 
 ## Contributing
 
-Contributions, issues, and feature requests are welcome. Check the [issues page](https://github.com/Coach40oz/Drive-X-Ray/issues).
+Contributions, issues and feature requests are welcome — see the
+[issues page](https://github.com/Coach40oz/Drive-X-Ray/issues).
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+[GNU General Public License v3.0](LICENSE)
 
 ## Author
 
